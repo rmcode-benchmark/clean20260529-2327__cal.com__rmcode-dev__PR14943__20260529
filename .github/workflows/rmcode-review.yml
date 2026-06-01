@@ -8,6 +8,9 @@ on:
       base_sha:
         required: true
         type: string
+      head_sha:
+        required: true
+        type: string
       diff_url:
         required: true
         type: string
@@ -71,28 +74,46 @@ jobs:
           printf '%s  extractor.mjs\n' '${{ inputs.extractor_sha256 }}' > extractor.mjs.sha256
           sha256sum -c extractor.mjs.sha256
 
-      - name: Download diff
+      - name: Prepare benchmark-compatible diff
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          if ! curl --fail --location --show-error --silent \
-            "${{ inputs.diff_url }}" \
-            -H "Authorization: token $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github.v3.diff" \
-            --output pr.diff; then
-            echo "GitHub diff API unavailable; generating diff from git objects..."
+          base_sha="${{ inputs.base_sha }}"
+          if git fetch --no-tags --depth=1 origin "$base_sha" \
+            && git fetch --no-tags --depth=1 origin "${{ inputs.head_sha }}" \
+            && git checkout --force "$base_sha" \
+            && git diff --no-ext-diff --abbrev=14 "$base_sha" "${{ inputs.head_sha }}" > pr.diff; then
+            echo "Generated diff from git objects."
+          else
+            echo "Git object diff unavailable; falling back to GitHub diff API..."
             curl --fail --location --show-error --silent \
               "${{ inputs.diff_url }}" \
               -H "Authorization: token $GITHUB_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              --output pr.json
-            head_sha="$(python3 -c 'import json; print(json.load(open("pr.json"))["head"]["sha"])')"
-            git fetch --no-tags --depth=1 origin "$head_sha"
-            git diff --no-ext-diff "${{ inputs.base_sha }}" "$head_sha" > pr.diff
+              -H "Accept: application/vnd.github.v3.diff" \
+              --output pr.diff
+          fi
+          if [ -n "${{ inputs.source_repository }}" ] && [ "${{ inputs.source_repository }}" != "${{ github.repository }}" ]; then
+            source_pr="$(python3 -c 'import os, re; repo = os.environ.get("GITHUB_REPOSITORY", ""); match = re.search(r"__PR(\d+)__", repo); print(match.group(1) if match else "")')"
+            if [ -n "$source_pr" ]; then
+              echo "Resolving source benchmark checkout for ${{ inputs.source_repository }}#$source_pr"
+              if source_base_sha="$(curl --fail --location --show-error --silent \
+                  "https://api.github.com/repos/${{ inputs.source_repository }}/pulls/$source_pr" \
+                  -H "Authorization: token $GITHUB_TOKEN" \
+                  -H "Accept: application/vnd.github+json" \
+                  | python3 -c 'import json, sys; print(json.load(sys.stdin)["base"]["sha"])')" \
+                && git fetch --no-tags --depth=1 origin "$source_base_sha" \
+                && git checkout --force "$source_base_sha"; then
+                echo "Checked out source benchmark base for context extraction."
+              else
+                echo "Could not prepare source benchmark checkout; using dispatched base checkout."
+              fi
+            fi
           fi
           echo "Diff size: $(wc -c < pr.diff) bytes"
 
       - name: Extract context and send to API
+        env:
+          REPOMAP_MAX_CHARS: "80000"
         run: |
           node extractor.mjs \
             --pr="${{ inputs.pr_number }}" \
