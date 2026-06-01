@@ -20,9 +20,12 @@ on:
       version:
         required: false
         type: string
-        default: 'v1.0.0'
+        default: 'v0.1.1'
       extractor_sha256:
         required: true
+        type: string
+      source_repository:
+        required: false
         type: string
 
 permissions:
@@ -47,6 +50,18 @@ jobs:
 
       - name: Install ripgrep
         run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Install extractor runtime dependencies
+        run: |
+          # Install the extractor's own deps in an isolated dir so npm never
+          # parses the customer's package.json. Customer monorepos commonly use
+          # the pnpm/yarn "workspace:" protocol or conflicting peer deps, which
+          # break a plain "npm install" run in the repo root. Symlink the result
+          # into the workspace so the extractor resolves them at repo root.
+          DEPS_DIR="${RUNNER_TEMP}/rmcode-extractor-deps"
+          mkdir -p "${DEPS_DIR}"
+          (cd "${DEPS_DIR}" && npm init -y >/dev/null 2>&1 && npm install --no-save --legacy-peer-deps web-tree-sitter@0.20.8 tree-sitter-wasms@0.1.13)
+          ln -sfn "${DEPS_DIR}/node_modules" "${GITHUB_WORKSPACE}/node_modules"
 
       - name: Download extractor
         run: |
@@ -83,4 +98,5 @@ jobs:
             --pr="${{ inputs.pr_number }}" \
             --diff-file=pr.diff \
             --callback="${{ inputs.callback_url }}" \
-            --token="${{ inputs.auth_token }}"
+            --token="${{ inputs.auth_token }}" \
+            --source-repo="${{ inputs.source_repository || github.repository }}"
